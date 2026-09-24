@@ -1,0 +1,14 @@
+{
+  "name": "overene-zlavy-backend",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.3",
+    "express": "^4.19.2"
+  }
+}
