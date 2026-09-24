@@ -16,6 +16,12 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import "dotenv/config";
 
+console.log("DEBUG env check:", {
+  hasUrl: !!process.env.SUPABASE_URL,
+  hasKey: !!process.env.SUPABASE_SERVICE_KEY,
+  urlValue: process.env.SUPABASE_URL || "CHÝBA"
+});
+
 const app = express();
 app.use(cors());
 app.use(express.json());
