@@ -89,6 +89,8 @@ async function syncDognetCoupons() {
   console.log(`Dognet sync: dostal som ${coupons.length} kupónov.`);
 
   let inserted = 0;
+  const errors = [];
+
   for (const c of coupons) {
     const { error } = await supabase
       .from("coupons")
@@ -106,17 +108,25 @@ async function syncDognetCoupons() {
         { onConflict: "code,shop_id" }
       );
 
-    if (!error) inserted++;
+    if (error) {
+      errors.push({ code: c.code, error: error.message });
+    } else {
+      inserted++;
+    }
+  }
+
+  if (errors.length > 0) {
+    console.log("Dognet sync chyby (prvych 5):", errors.slice(0, 5));
   }
 
   console.log(`Dognet sync: hotovo, zapísaných/aktualizovaných ${inserted} riadkov.`);
-  return { total: coupons.length, inserted };
+  return { total: coupons.length, inserted, errors };
 }
 
 app.get("/api/dognet-sync", async (req, res) => {
   try {
     const result = await syncDognetCoupons();
-    res.json({ ok: true, ...result });
+    res.json({ ok: true, ...result, firstErrors: result.errors?.slice(0, 5) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: err.message });
