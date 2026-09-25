@@ -34,6 +34,95 @@ const supabase = createClient(
 // Po koľkých zlyhaniach za sebou sa kód automaticky vypne
 const FAIL_THRESHOLD = 5;
 
+const DOGNET_EMAIL = process.env.DOGNET_EMAIL;
+const DOGNET_PASSWORD = process.env.DOGNET_PASSWORD;
+
+async function dognetLogin() {
+  const res = await fetch("https://api.app.dognet.com/api/v1/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: DOGNET_EMAIL, password: DOGNET_PASSWORD })
+  });
+
+  if (!res.ok) {
+    throw new Error(`Dognet login zlyhal: ${res.status} ${await res.text()}`);
+  }
+
+  const data = await res.json();
+  const token = data.token || data.access_token || data.data?.token;
+
+  if (!token) {
+    throw new Error("Token sa nenašiel v odpovedi: " + JSON.stringify(data));
+  }
+
+  return token;
+}
+
+async function fetchDognetCoupons(token) {
+  const res = await fetch("https://api.app.dognet.com/api/v1/coupons/filter", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      from_joined_campaigns: true,
+      filter: [{ validity: { eq: "present" } }],
+      expand: "campaign"
+    })
+  });
+
+  if (!res.ok) {
+    throw new Error(`Dognet coupons/filter zlyhal: ${res.status} ${await res.text()}`);
+  }
+
+  const data = await res.json();
+  return data.data || [];
+}
+
+async function syncDognetCoupons() {
+  console.log("Dognet sync: prihlasujem sa...");
+  const token = await dognetLogin();
+
+  console.log("Dognet sync: sťahujem kupóny...");
+  const coupons = await fetchDognetCoupons(token);
+  console.log(`Dognet sync: dostal som ${coupons.length} kupónov.`);
+
+  let inserted = 0;
+  for (const c of coupons) {
+    const { error } = await supabase
+      .from("coupons")
+      .upsert(
+        {
+          code: c.code || c.coupon_code,
+          shop_id: c.campaign?.domain || c.campaign?.name || "unknown",
+          category: null,
+          min_amount: 0,
+          discount_percent: c.value || null,
+          valid_from: c.valid_from || null,
+          valid_until: c.valid_to || c.valid_until || null,
+          is_active: true
+        },
+        { onConflict: "code,shop_id" }
+      );
+
+    if (!error) inserted++;
+  }
+
+  console.log(`Dognet sync: hotovo, zapísaných/aktualizovaných ${inserted} riadkov.`);
+  return { total: coupons.length, inserted };
+}
+
+app.get("/api/dognet-sync", async (req, res) => {
+  try {
+    const result = await syncDognetCoupons();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ---- GET /api/coupons?shop=alza.sk -------------------------------------
 app.get("/api/coupons", async (req, res) => {
   const shopId = req.query.shop;

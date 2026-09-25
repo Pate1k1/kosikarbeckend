@@ -1,6 +1,11 @@
 # Environment variables
 .env
 
+# PHP test / Post Affiliate Pro (súkromné / lokálne)
+test_coupons.php
+dognet_check.php
+PapApi.class.php
+
 # Dependencies
 node_modules/
 
