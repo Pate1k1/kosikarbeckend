@@ -59,68 +59,99 @@ async function dognetLogin() {
 }
 
 async function fetchDognetCoupons(token) {
-  const res = await fetch("https://api.app.dognet.com/api/v1/coupons/filter", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`
-    },
-    body: JSON.stringify({
-      from_joined_campaigns: true,
-      filter: [{ validity: { eq: "present" } }],
-      expand: "campaign"
-    })
-  });
+  const all = [];
+  for (let page = 1; page <= 20; page++) {
+    const res = await fetch("https://api.app.dognet.com/api/v1/coupons/filter", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        from_joined_campaigns: true,
+        filter: [{ validity: { eq: "present" } }],
+        expand: "campaign",
+        "per-page": 1000,
+        page
+      })
+    });
 
-  if (!res.ok) {
-    throw new Error(`Dognet coupons/filter zlyhal: ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      throw new Error(`Dognet coupons/filter zlyhal: ${res.status} ${await res.text()}`);
+    }
+
+    const data = await res.json();
+    const items = data.data || [];
+    all.push(...items);
+
+    if (items.length < 1000) break;
+    await new Promise((r) => setTimeout(r, 7000));
   }
+  return all;
+}
 
-  const data = await res.json();
-  return data.data || [];
+function normalizeShopId(c) {
+  const raw = c.campaign?.domain || c.campaign?.name || "unknown";
+  return String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/\s*\(.*\)\s*$/, "")
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/.*$/, "");
 }
 
 async function syncDognetCoupons() {
-  console.log("Dognet sync: prihlasujem sa...");
+  const startedAt = new Date().toISOString();
   const token = await dognetLogin();
-
-  console.log("Dognet sync: sťahujem kupóny...");
   const coupons = await fetchDognetCoupons(token);
-  console.log(`Dognet sync: dostal som ${coupons.length} kupónov.`);
 
-  let inserted = 0;
-  const errors = [];
-
+  const byKey = new Map();
   for (const c of coupons) {
-    const { error } = await supabase
-      .from("coupons")
-      .upsert(
-        {
-          code: c.code || c.coupon_code,
-          shop_id: c.campaign?.domain || c.campaign?.name || "unknown",
-          category: null,
-          min_amount: 0,
-          discount_percent: c.value || null,
-          valid_from: c.valid_from || null,
-          valid_until: c.valid_to || c.valid_until || null,
-          is_active: true
-        },
-        { onConflict: "code,shop_id" }
-      );
+    const shopId = normalizeShopId(c);
+    const codes = String(c.code || c.coupon_code || "")
+      .split(/[,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
 
-    if (error) {
-      errors.push({ code: c.code, error: error.message });
-    } else {
-      inserted++;
+    for (const code of codes) {
+      byKey.set(`${code}|${shopId}`, {
+        code,
+        shop_id: shopId,
+        source: "dognet",
+        discount_text: c.value != null ? String(c.value) : null,
+        valid_from: c.valid_from || null,
+        valid_until: c.valid_to || c.valid_until || null,
+        in_feed: true,
+        last_seen_at: startedAt
+      });
     }
   }
 
-  if (errors.length > 0) {
-    console.log("Dognet sync chyby (prvych 5):", errors.slice(0, 5));
+  const rows = [...byKey.values()];
+  let written = 0;
+  const errors = [];
+
+  for (let i = 0; i < rows.length; i += 100) {
+    const chunk = rows.slice(i, i + 100);
+    const { error } = await supabase
+      .from("coupons")
+      .upsert(chunk, { onConflict: "code,shop_id" });
+    if (error) errors.push(error.message);
+    else written += chunk.length;
   }
 
-  console.log(`Dognet sync: hotovo, zapísaných/aktualizovaných ${inserted} riadkov.`);
-  return { total: coupons.length, inserted, errors };
+  if (errors.length === 0 && rows.length > 0) {
+    const { error } = await supabase
+      .from("coupons")
+      .update({ in_feed: false })
+      .eq("source", "dognet")
+      .or(`last_seen_at.is.null,last_seen_at.lt.${startedAt}`);
+    if (error) errors.push(error.message);
+  }
+
+  console.log(`Dognet sync: ${coupons.length} záznamov, ${rows.length} kódov, zapísaných ${written}, chýb ${errors.length}`);
+  return { total: coupons.length, codes: rows.length, written, errors: errors.slice(0, 5) };
 }
 
 app.get("/api/dognet-sync", async (req, res) => {
@@ -140,16 +171,21 @@ app.get("/api/coupons", async (req, res) => {
     return res.status(400).json({ error: "chýba parameter 'shop'" });
   }
 
+  const today = new Date().toISOString().split("T")[0];
+
   const { data, error } = await supabase
     .from("coupons")
-    .select("code, category, min_amount")
+    .select("code, category, min_amount, discount_text, valid_until")
     .eq("shop_id", shopId)
-    .eq("is_active", true);
+    .eq("is_active", true)
+    .eq("in_feed", true)
+    .or(`valid_from.is.null,valid_from.lte.${today}`)
+    .or(`valid_until.is.null,valid_until.gte.${today}`)
+    .order("success_count", { ascending: false });
 
   if (error) {
     console.error("Supabase error:", error);
-    console.error("Cause:", error.cause);
-    return res.status(500).json({ error: error.message, cause: String(error.cause) });
+    return res.status(500).json({ error: error.message });
   }
 
   res.json({ coupons: data });
@@ -206,3 +242,17 @@ const port = process.env.PORT || 3000;
 app.listen(port, "0.0.0.0", () => {
   console.log(`Backend beží na porte ${port}`);
 });
+
+const SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+async function scheduledSync() {
+  try {
+    const r = await syncDognetCoupons();
+    console.log("Plánovaný sync OK:", r);
+  } catch (err) {
+    console.error("Plánovaný sync zlyhal:", err.message);
+  }
+}
+
+setTimeout(scheduledSync, 15000);
+setInterval(scheduledSync, SYNC_INTERVAL_MS);
